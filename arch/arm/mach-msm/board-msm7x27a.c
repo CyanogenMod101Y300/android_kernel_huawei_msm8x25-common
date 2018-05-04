@@ -83,7 +83,8 @@ static ssize_t  buf_vkey_size=0;
 #endif
 
 #define PMEM_KERNEL_EBI1_SIZE	0x3A000
-#define MSM_PMEM_AUDIO_SIZE	0x1F4000
+#define MSM_PMEM_AUDIO_SIZE	0xF0000
+#define BOOTLOADER_BASE_ADDR	0x10000
 
 #if defined(CONFIG_GPIO_SX150X)
 enum {
@@ -253,46 +254,29 @@ static struct msm_i2c_platform_data msm_gsbi1_qup_i2c_pdata = {
 	.msm_i2c_config_gpio	= gsbi_qup_i2c_gpio_config,
 };
 
+
 #ifdef CONFIG_ARCH_MSM7X27A
+//lwl modify
 #define MSM_PMEM_MDP_SIZE       0x2300000
+//#define MSM_PMEM_MDP_SIZE       0
+//end
 #define MSM7x25A_MSM_PMEM_MDP_SIZE       0x1500000
 
-#define MSM_PMEM_ADSP_SIZE      0x1200000
-#define MSM_PMEM_ADSP_BIG_SIZE      0x1E00000
+#define MSM_PMEM_ADSP_SIZE      0x1300000
 #define MSM7x25A_MSM_PMEM_ADSP_SIZE      0xB91000
 #define CAMERA_ZSL_SIZE		(SZ_1M * 60)
-
-#define MSM_3M_PMEM_ADSP_SIZE	(0x1048000)
-/*   enlarge the pmem space for HDR on 8950s
- */
-static unsigned int get_pmem_adsp_size(void)
-{
-	if( machine_is_msm8x25_C8950D()
-	|| machine_is_msm8x25_U8950D()
-	/*delete some line; to reduce pmem for releasing memory*/
-	||machine_is_msm8x25_U8950()){
-			return CAMERA_ZSL_SIZE;		
-		}
-	else if (machine_is_msm7x27a_H867G()
-           || machine_is_msm7x27a_H868C()
-	   || machine_is_msm8x25_Y301_A1() )
-	{
-		return  MSM_3M_PMEM_ADSP_SIZE;
-	}	
-	else
-		return MSM_PMEM_ADSP_SIZE;
-
-}
 #endif
 
 #ifdef CONFIG_ION_MSM
-#define MSM_ION_HEAP_NUM        4
+#define MSM_ION_HEAP_NUM        5
 static struct platform_device ion_dev;
 static int msm_ion_camera_size;
 static int msm_ion_audio_size;
 static int msm_ion_sf_size;
+static int msm_ion_camera_size_carving;
 #endif
 
+#define CAMERA_HEAP_TYPE	ION_HEAP_TYPE_CARVEOUT
 
 static struct android_usb_platform_data android_usb_pdata = {
 	.update_pid_and_serial_num = usb_diag_update_pid_and_serial_num,
@@ -566,7 +550,6 @@ static struct android_pmem_platform_data android_pmem_adsp_pdata = {
 	.allocator_type = PMEM_ALLOCATORTYPE_BITMAP,
 	.cached = 1,
 	.memory_type = MEMTYPE_EBI1,
-	/*  update Qcomm original  base line , delete 3 lines for fmem disable and avoid deadlock*/
 };
 
 static struct platform_device android_pmem_adsp_device = {
@@ -612,6 +595,7 @@ static struct android_pmem_platform_data android_pmem_pdata = {
 	.cached = 1,
 	.memory_type = MEMTYPE_EBI1,
 };
+
 static struct platform_device android_pmem_device = {
 	.name = "android_pmem",
 	.id = 0,
@@ -882,19 +866,15 @@ static void fix_sizes(void)
 		pmem_mdp_size = MSM7x25A_MSM_PMEM_MDP_SIZE;
 		pmem_adsp_size = MSM7x25A_MSM_PMEM_ADSP_SIZE;
 	} else {
-		pmem_mdp_size = get_mdp_pmem_size();
-		printk("pmem_mdp_size=%08x\n",pmem_mdp_size);
-		pmem_adsp_size = get_pmem_adsp_size();
-		printk("pmem_adsp_size=%08x\n",pmem_adsp_size);
+		pmem_mdp_size = MSM_PMEM_MDP_SIZE;
+		pmem_adsp_size = CAMERA_ZSL_SIZE;
 	}
-/*delete qcom code */
-/*
-	if (get_ddr_size() > SZ_512M)
-		pmem_adsp_size = CAMERA_ZSL_SIZE;*/
+
 #ifdef CONFIG_ION_MSM
-	msm_ion_camera_size = pmem_adsp_size;
-	msm_ion_audio_size = (MSM_PMEM_AUDIO_SIZE + PMEM_KERNEL_EBI1_SIZE);
+	msm_ion_audio_size = MSM_PMEM_AUDIO_SIZE;
 	msm_ion_sf_size = pmem_mdp_size;
+	msm_ion_camera_size = pmem_adsp_size;
+	msm_ion_camera_size_carving = msm_ion_camera_size;
 #endif
 }
 
@@ -904,16 +884,29 @@ static struct ion_co_heap_pdata co_ion_pdata = {
 	.adjacent_mem_id = INVALID_HEAP_ID,
 	.align = PAGE_SIZE,
 };
+
+static struct ion_co_heap_pdata co_mm_ion_pdata = {
+	.adjacent_mem_id = INVALID_HEAP_ID,
+	.align = PAGE_SIZE,
+};
+
+static u64 msm_dmamask = DMA_BIT_MASK(32);
+
+static struct platform_device ion_cma_device = {
+	.name = "ion-cma-device",
+	.id = -1,
+	.dev = {
+		.dma_mask = &msm_dmamask,
+		.coherent_dma_mask = DMA_BIT_MASK(32),
+	}
+};
 #endif
 
 /**
  * These heaps are listed in the order they will be allocated.
  * Don't swap the order unless you know what you are doing!
  */
-static struct ion_platform_data ion_pdata = {
-	.nr = MSM_ION_HEAP_NUM,
-	.has_outer_cache = 1,
-	.heaps = {
+struct ion_platform_heap msm7x27a_heaps[] = {
 		{
 			.id	= ION_SYSTEM_HEAP_ID,
 			.type	= ION_HEAP_TYPE_SYSTEM,
@@ -923,12 +916,13 @@ static struct ion_platform_data ion_pdata = {
 		/* PMEM_ADSP = CAMERA */
 		{
 			.id	= ION_CAMERA_HEAP_ID,
-			.type	= ION_HEAP_TYPE_CARVEOUT,
+			.type	= CAMERA_HEAP_TYPE,
 			.name	= ION_CAMERA_HEAP_NAME,
 			.memory_type = ION_EBI_TYPE,
-			.extra_data = (void *)&co_ion_pdata,
+			.extra_data = (void *)&co_mm_ion_pdata,
+			.priv	= (void *)&ion_cma_device.dev,
 		},
-		/* PMEM_AUDIO */
+		/* AUDIO HEAP 1*/
 		{
 			.id	= ION_AUDIO_HEAP_ID,
 			.type	= ION_HEAP_TYPE_CARVEOUT,
@@ -944,8 +938,23 @@ static struct ion_platform_data ion_pdata = {
 			.memory_type = ION_EBI_TYPE,
 			.extra_data = (void *)&co_ion_pdata,
 		},
+		/* AUDIO HEAP 2*/
+		{
+			.id	= ION_AUDIO_HEAP_BL_ID,
+			.type	= ION_HEAP_TYPE_CARVEOUT,
+			.name	= ION_AUDIO_BL_HEAP_NAME,
+			.memory_type = ION_EBI_TYPE,
+			.extra_data = (void *)&co_ion_pdata,
+			.base = BOOTLOADER_BASE_ADDR,
+		},
+
 #endif
-	}
+};
+
+static struct ion_platform_data ion_pdata = {
+	.nr = MSM_ION_HEAP_NUM,
+	.has_outer_cache = 1,
+	.heaps = msm7x27a_heaps,
 };
 
 static struct platform_device ion_dev = {
@@ -966,20 +975,23 @@ static struct memtype_reserve msm7x27a_reserve_table[] __initdata = {
 	},
 };
 
-/*  update Qcomm original  base line , delete 7 lines for fmem disable and avoid deadlock*/
+#ifdef CONFIG_ANDROID_PMEM
+#ifndef CONFIG_MSM_MULTIMEDIA_USE_ION
+static struct android_pmem_platform_data *pmem_pdata_array[] __initdata = {
+		&android_pmem_adsp_pdata,
+		&android_pmem_audio_pdata,
+		&android_pmem_pdata,
+};
+#endif
+#endif
 
 static void __init size_pmem_devices(void)
 {
 #ifdef CONFIG_ANDROID_PMEM
 #ifndef CONFIG_MSM_MULTIMEDIA_USE_ION
-
-    /*  update Qcomm original  base line , delete 2 lines for fmem disable and avoid deadlock*/
 	android_pmem_adsp_pdata.size = pmem_adsp_size;
 	android_pmem_pdata.size = pmem_mdp_size;
 	android_pmem_audio_pdata.size = pmem_audio_size;
-
-    /*  update Qcomm original  base line , delete 19 lines for fmem disable and avoid deadlock*/
-
 #endif
 #endif
 }
@@ -997,10 +1009,9 @@ static void __init reserve_pmem_memory(void)
 {
 #ifdef CONFIG_ANDROID_PMEM
 #ifndef CONFIG_MSM_MULTIMEDIA_USE_ION
-    /*  update Qcomm original  base line , delete 3 lines and add 3 lines for fmem disable and avoid deadlock*/	
-	reserve_memory_for(&android_pmem_adsp_pdata);
-	reserve_memory_for(&android_pmem_pdata);
-	reserve_memory_for(&android_pmem_audio_pdata);
+	unsigned int i;
+	for (i = 0; i < ARRAY_SIZE(pmem_pdata_array); ++i)
+		reserve_memory_for(pmem_pdata_array[i]);
 
 	msm7x27a_reserve_table[MEMTYPE_EBI1].size += pmem_kernel_ebi1_size;
 #endif
@@ -1011,16 +1022,18 @@ static void __init size_ion_devices(void)
 {
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
 	ion_pdata.heaps[1].size = msm_ion_camera_size;
-	ion_pdata.heaps[2].size = msm_ion_audio_size;
+	ion_pdata.heaps[2].size = PMEM_KERNEL_EBI1_SIZE;
 	ion_pdata.heaps[3].size = msm_ion_sf_size;
+	ion_pdata.heaps[4].size = msm_ion_audio_size;
 #endif
 }
 
 static void __init reserve_ion_memory(void)
 {
 #if defined(CONFIG_ION_MSM) && defined(CONFIG_MSM_MULTIMEDIA_USE_ION)
-	msm7x27a_reserve_table[MEMTYPE_EBI1].size += msm_ion_camera_size;
-	msm7x27a_reserve_table[MEMTYPE_EBI1].size += msm_ion_audio_size;
+	msm7x27a_reserve_table[MEMTYPE_EBI1].size += PMEM_KERNEL_EBI1_SIZE;
+	msm7x27a_reserve_table[MEMTYPE_EBI1].size +=
+		msm_ion_camera_size_carving;
 	msm7x27a_reserve_table[MEMTYPE_EBI1].size += msm_ion_sf_size;
 #endif
 }
@@ -1045,78 +1058,20 @@ static struct reserve_info msm7x27a_reserve_info __initdata = {
 	.paddr_to_memtype = msm7x27a_paddr_to_memtype,
 };
 
-/* define size of reserve memory is 1M */
-#ifdef CONFIG_SRECORDER_MSM
-#define SRECORDER_RESERVED_MEM_SIZE (SZ_512K)
-
-/* define start address of reserve memory */
-static unsigned long s_srecorder_reserved_mem_phys_start_addr = 0x0;
-
-/*
- * Function:       unsigned long get_srecorder_reserved_mem_size(void)
- * Description:    get size of reserve memory
- * Calls:          No
- * Called By:      setup_arch
- * Table Accessed: No
- * Table Updated:  No
- * Input:          No
- * Output:         No
- * Return:         SRECORDER_RESERVED_MEM_SIZE: size of reserve memory
- * Others:         No
- */
-unsigned long get_srecorder_reserved_mem_size(void)
-{
-    return SRECORDER_RESERVED_MEM_SIZE;
-}
-
-/*
- * Function:       unsigned long get_mempools_pstart_addr(void)
- * Description:    get start address of reserve memory
- * Calls:          No
- * Called By:      msm8625_reserve
- * Table Accessed: No
- * Table Updated:  No
- * Input:          No
- * Output:         No
- * Return:         s_srecorder_reserved_mem_phys_start_addr:start address of reserve memory
- * Others:         No
- */
-unsigned long get_srecorder_reserved_mem_phys_start_addr(void)
-{
-    return s_srecorder_reserved_mem_phys_start_addr;
-}
-
-extern unsigned long get_mempools_pstart_addr(void);
-#endif /* CONFIG_SRECORDER_MSM */
-
 static void __init msm7x27a_reserve(void)
 {
 	reserve_info = &msm7x27a_reserve_info;
+	memblock_remove(MSM8625_NON_CACHE_MEM, SZ_2K);
+	memblock_remove(BOOTLOADER_BASE_ADDR, msm_ion_audio_size);
 	msm_reserve();
-#ifdef CONFIG_SRECORDER_MSM
-    if (0x0 != get_mempools_pstart_addr())
-    {
-        s_srecorder_reserved_mem_phys_start_addr = get_mempools_pstart_addr();// - SRECORDER_RESERVED_MEM_SIZE;
-    }
-    else
-    {
-        printk(">>>> Can't know the start address for S-Recorder's reserved memory!\n");
-    }
-#endif /* CONFIG_SRECORDER_MSM */
 }
-
-
-/* 此段代码被全部移到static void __init msm7x27a_reserve(void)函数前面 */
 
 static void __init msm8625_reserve(void)
 {
-	msm7x27a_reserve();
-
-/* 此段代码被全部移到的实现被移到static void __init msm7x27a_reserve(void)函数里面实现 */
-
 	memblock_remove(MSM8625_SECONDARY_PHYS, SZ_8);
 	memblock_remove(MSM8625_WARM_BOOT_PHYS, SZ_32);
 	memblock_remove(MSM8625_NON_CACHE_MEM, SZ_2K);
+	msm7x27a_reserve();
 }
 
 static void __init msm7x27a_device_i2c_init(void)
